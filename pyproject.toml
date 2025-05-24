@@ -1,0 +1,15 @@
+[project]
+name = "geotag"
+version = "0.1.0"
+description = "Multithread geotagging of photos using EXIF and GPX data"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+authors = [
+    { name = "mgt", email = "mgt@oi-wiki.org" }
+]
+license = "MIT"
+keywords = ["geotag", "exif", "gpx", "cli", "photo"]
+
+[project.scripts]
+geotag = "main:main"
