@@ -1,14 +1,14 @@
 import argparse
 import os
 import subprocess
-import threading
 import multiprocessing
-import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Tuple, Optional
 import time
-from dateexpr import DateExpressionParser  # 替换为自定义表达式解析器
+from src.dateexpr import DateExpressionParser  # 替换为自定义表达式解析器
+import tqdm
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 class GeoTagger:
@@ -25,37 +25,38 @@ class GeoTagger:
         self.date_parser = DateExpressionParser(date_expression)
         self.threads = threads if threads else multiprocessing.cpu_count() * 2
         self.dry_run = dry_run
-        self.supported_extensions = {
-            ".jpg",
-            ".jpeg",
-            ".tiff",
-            ".tif",
-            ".cr2",
-            ".nef",
-            ".arw",
-            ".dng",
-            ".heic",
-            ".png",
-        }
 
     def find_files(self) -> List[Tuple[Path, datetime]]:
-        """查找目录下符合日期表达式的所有文件（不再按扩展名过滤）"""
+        """多线程查找目录下符合日期表达式的所有文件（不再按扩展名过滤）"""
         files_with_dates = []
-
         print(f"正在扫描目录: {self.directory}")
-        for file_path in self.directory.rglob("*"):
+        all_files = list(self.directory.rglob("*"))
+
+        def check_file(file_path):
             if file_path.is_file():
                 try:
-                    # 获取文件修改时间
                     mtime = datetime.fromtimestamp(
                         file_path.stat().st_mtime, tz=timezone.utc
                     )
                     if self.date_parser.evaluate(mtime):
-                        files_with_dates.append((file_path, mtime))
+                        return (file_path, mtime)
                 except OSError as e:
                     print(f"无法获取文件 {file_path} 的修改时间: {e}")
                 except ValueError as e:
                     print(f"日期表达式评估错误: {e}")
+            return None
+
+        with ThreadPoolExecutor(max_workers=self.threads) as executor:
+            futures = {
+                executor.submit(check_file, file_path): file_path
+                for file_path in all_files
+            }
+            for f in tqdm.tqdm(
+                as_completed(futures), total=len(futures), desc="扫描文件", unit="file"
+            ):
+                result = f.result()
+                if result:
+                    files_with_dates.append(result)
 
         print(f"找到 {len(files_with_dates)} 个符合条件的文件")
         return files_with_dates
@@ -83,45 +84,31 @@ class GeoTagger:
 
     def process_chunk(self, chunk: List[Path], thread_id: int):
         """处理一个文件分段（批量调用exiftool）"""
-        print(f"线程 {thread_id} 开始处理 {len(chunk)} 个文件")
-
+        # 只在 dry_run 时输出命令，其他情况下减少日志
         if not chunk:
-            print(f"线程 {thread_id} 分段为空，跳过")
             return
 
         try:
-            # 构建exiftool命令，使用GPX文件进行地理标记
             cmd = [
                 "exiftool",
                 "-overwrite_original",
             ]
-
-            # 添加所有GPX文件参数
             for gpx_file in self.gpx_files:
                 cmd.extend(["-geotag", str(gpx_file)])
-
-            # 添加所有目标文件
             cmd.extend([str(file_path) for file_path in chunk])
 
             if self.dry_run:
-                # Dry run模式：只显示将要执行的命令
                 cmd_str = " ".join(f'"{arg}"' if " " in arg else arg for arg in cmd)
                 print(f"线程 {thread_id} DRY RUN: {cmd_str}")
             else:
                 result = subprocess.run(cmd, capture_output=True, text=True)
-
-                if result.returncode == 0:
-                    print(f"线程 {thread_id} 成功处理 {len(chunk)} 个文件")
-                else:
+                if result.returncode != 0:
                     print(f"线程 {thread_id} 处理失败: {result.stderr.strip()}")
-
         except subprocess.TimeoutExpired:
             if not self.dry_run:
                 print(f"线程 {thread_id} 批量处理超时")
         except Exception as e:
             print(f"线程 {thread_id} 错误: {e}")
-
-        print(f"线程 {thread_id} 完成处理")
 
     def run(self):
         """执行整个geo tagging流程"""
@@ -141,19 +128,17 @@ class GeoTagger:
         chunks = self.chunk_files(sorted_files)
         print(f"文件已分为 {len(chunks)} 个分段，使用 {len(chunks)} 个线程")
 
-        # 4. 多线程处理
-        threads = []
+        # 4. 多线程处理（用ThreadPoolExecutor重构）
         start_time = time.time()
-
-        for i, chunk in enumerate(chunks):
-            thread = threading.Thread(target=self.process_chunk, args=(chunk, i + 1))
-            threads.append(thread)
-            thread.start()
-
-        # 等待所有线程完成
-        for thread in threads:
-            thread.join()
-
+        with ThreadPoolExecutor(max_workers=self.threads) as executor:
+            futures = [
+                executor.submit(self.process_chunk, chunk, i + 1)
+                for i, chunk in enumerate(chunks)
+            ]
+            for f in tqdm.tqdm(
+                as_completed(futures), total=len(futures), desc="线程进度", unit="chunk"
+            ):
+                f.result()  # 捕获异常
         end_time = time.time()
         print(f"所有处理完成，耗时: {end_time - start_time:.2f} 秒")
 
@@ -219,7 +204,7 @@ def main():
     # 设置默认线程数
     threads = args.threads if args.threads else multiprocessing.cpu_count() * 2
 
-    print(f"开始处理...")
+    print("开始处理...")
     print(f"目录: {args.directory}")
     print(f"GPX文件: {', '.join(args.gpx_files)}")
     print(f"日期表达式: {args.date_expression}")
