@@ -24,6 +24,16 @@ pip install .
 pip install geotag
 ```
 
+### 使用 pipx 安装
+
+推荐使用 [pipx](https://github.com/pypa/pipx) 进行全局隔离安装：
+
+```sh
+pipx install geotag
+```
+
+安装后可直接在命令行使用 `geotag` 命令。
+
 ## 用法
 
 ```sh

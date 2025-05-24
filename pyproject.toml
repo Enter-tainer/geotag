@@ -14,4 +14,11 @@ license = "MIT"
 keywords = ["geotag", "exif", "gpx", "cli", "photo"]
 
 [project.scripts]
-geotag = "main:main"
+geotag = "src.main:main"
+
+[build-system]
+requires = ["hatchling >= 1.26"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
