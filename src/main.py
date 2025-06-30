@@ -14,23 +14,29 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 class GeoTagger:
     def __init__(
         self,
-        directory: str,
+        directories: List[str],
         gpx_files: List[str],
-        date_expression: str,
+        date_expression: Optional[str] = None,
         threads: Optional[int] = None,
         dry_run: bool = False,
     ):
-        self.directory = Path(directory)
+        self.directories = [Path(directory) for directory in directories]
         self.gpx_files = [Path(gpx) for gpx in gpx_files]
-        self.date_parser = DateExpressionParser(date_expression)
+        self.date_parser = (
+            DateExpressionParser(date_expression) if date_expression else None
+        )
         self.threads = threads if threads else multiprocessing.cpu_count() * 2
         self.dry_run = dry_run
 
     def find_files(self) -> List[Tuple[Path, datetime]]:
-        """多线程查找目录下符合日期表达式的所有文件（不再按扩展名过滤）"""
+        """多线程查找多个目录下符合日期表达式的所有文件（不再按扩展名过滤）"""
         files_with_dates = []
-        print(f"正在扫描目录: {self.directory}")
-        all_files = list(self.directory.rglob("*"))
+        all_files = []
+
+        # 从所有目录收集文件
+        for directory in self.directories:
+            print(f"正在扫描目录: {directory}")
+            all_files.extend(list(directory.rglob("*")))
 
         def check_file(file_path):
             if file_path.is_file():
@@ -38,7 +44,8 @@ class GeoTagger:
                     mtime = datetime.fromtimestamp(
                         file_path.stat().st_mtime, tz=timezone.utc
                     )
-                    if self.date_parser.evaluate(mtime):
+                    # 如果没有日期过滤器，或者日期符合条件，则包含该文件
+                    if self.date_parser is None or self.date_parser.evaluate(mtime):
                         return (file_path, mtime)
                 except OSError as e:
                     print(f"无法获取文件 {file_path} 的修改时间: {e}")
@@ -149,16 +156,28 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例用法:
-  python main.py /path/to/photos track1.gpx track2.gpx "date > 20250101"
-  python main.py /path/to/photos *.gpx "date > 20250101 and date < 20260101" --threads 8
+  python main.py --dirs /path/to/photos1 /path/to/photos2 --gpx track1.gpx track2.gpx
+  python main.py --dirs /path/to/photos --gpx track1.gpx track2.gpx --filter "date > 20250101"
+  python main.py --dirs /path/to/photos1 /path/to/photos2 --gpx *.gpx --filter "date > 20250101 and date < 20260101" --threads 8
         """,
     )
 
-    parser.add_argument("directory", help="要处理的图像文件目录")
-    parser.add_argument("gpx_files", nargs="+", help="一个或多个GPX轨迹文件")
     parser.add_argument(
-        "date_expression",
-        help='日期过滤表达式，如 "date > 20250101" 或 "date > 20250101 and date < 20260101"',
+        "--dirs",
+        "--directories",
+        nargs="+",
+        required=True,
+        help="要处理的图像文件目录（可以是多个）",
+    )
+    parser.add_argument(
+        "--gpx", "--gpx-files", nargs="+", required=True, help="一个或多个GPX轨迹文件"
+    )
+    parser.add_argument(
+        "--filter",
+        "--date-expression",
+        dest="date_expression",
+        default=None,
+        help='日期过滤表达式，如 "date > 20250101" 或 "date > 20250101 and date < 20260101"。如果不提供则不过滤',
     )
     parser.add_argument(
         "--threads",
@@ -174,25 +193,27 @@ def main():
     args = parser.parse_args()
 
     # 验证目录存在
-    if not os.path.isdir(args.directory):
-        print(f"错误: 目录不存在: {args.directory}")
-        return 1
+    for directory in args.dirs:
+        if not os.path.isdir(directory):
+            print(f"错误: 目录不存在: {directory}")
+            return 1
 
     # 验证GPX文件存在
-    for gpx_file in args.gpx_files:
+    for gpx_file in args.gpx:
         if not os.path.isfile(gpx_file):
             print(f"错误: GPX文件不存在: {gpx_file}")
             return 1
 
-    # 验证日期表达式
-    try:
-        # 创建一个测试解析器来验证表达式格式
-        test_parser = DateExpressionParser(args.date_expression)
-        test_date = datetime.now(tz=timezone.utc)
-        test_parser.evaluate(test_date)  # 测试表达式是否可以正常执行
-    except ValueError as e:
-        print(f"错误: 日期表达式无效: {e}")
-        return 1
+    # 验证日期表达式（如果提供的话）
+    if args.date_expression:
+        try:
+            # 创建一个测试解析器来验证表达式格式
+            test_parser = DateExpressionParser(args.date_expression)
+            test_date = datetime.now(tz=timezone.utc)
+            test_parser.evaluate(test_date)  # 测试表达式是否可以正常执行
+        except ValueError as e:
+            print(f"错误: 日期表达式无效: {e}")
+            return 1
 
     # 检查exiftool是否可用
     try:
@@ -205,18 +226,18 @@ def main():
     threads = args.threads if args.threads else multiprocessing.cpu_count() * 2
 
     print("开始处理...")
-    print(f"目录: {args.directory}")
-    print(f"GPX文件: {', '.join(args.gpx_files)}")
-    print(f"日期表达式: {args.date_expression}")
+    print(f"目录: {', '.join(args.dirs)}")
+    print(f"GPX文件: {', '.join(args.gpx)}")
+    print(
+        f"日期表达式: {args.date_expression if args.date_expression else '无（不过滤）'}"
+    )
     print(f"线程数: {threads}")
     if args.dry_run:
         print("模式: DRY RUN (不会修改文件)")
     print("-" * 50)
 
     # 创建并运行GeoTagger
-    tagger = GeoTagger(
-        args.directory, args.gpx_files, args.date_expression, threads, args.dry_run
-    )
+    tagger = GeoTagger(args.dirs, args.gpx, args.date_expression, threads, args.dry_run)
     tagger.run()
 
     return 0
